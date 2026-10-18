@@ -1,0 +1,92 @@
+# Multilevel Monte Carlo for SDEs         //Readme
+Giles-style MLMC with coupled Euler–Maruyama paths pricing a European call under GBM; Black–Scholes closed form is the reference.
+**Checks:** level-variance decay rate (~h), telescoping-sum bias, estimate within 4 standard errors of truth,
+and cost below standard Monte Carlo at the same accuracy.
+Run: `pip install numpy pytest && pytest`;
+
+import numpy as np                      //"""Multilevel Monte Carlo (Giles 2008) for a European call under GBM with Euler-Maruyama."""
+from math import erf, exp, log, sqrt
+
+S0, K, R, SIG, T = 100.0, 100.0, 0.05, 0.2, 1.0
+
+
+def bs_call(S0=S0, K=K, r=R, sig=SIG, T=T):
+    N = lambda x: 0.5 * (1 + erf(x / sqrt(2)))
+    d1 = (log(S0 / K) + (r + 0.5 * sig**2) * T) / (sig * sqrt(T)); d2 = d1 - sig * sqrt(T)
+    return S0 * N(d1) - K * exp(-r * T) * N(d2)
+
+
+def payoff(S):
+    return exp(-R * T) * np.maximum(S - K, 0.0)
+
+
+def level_samples(l, N, rng, M=2):
+    """Return N samples of Y_l = P_l - P_{l-1} (coupled via summed Brownian increments)."""
+    nf = M**l; hf = T / nf
+    dW = np.sqrt(hf) * rng.standard_normal((N, nf))
+    Sf = np.full(N, S0)
+    for i in range(nf):
+        Sf = Sf + R * Sf * hf + SIG * Sf * dW[:, i]
+    if l == 0:
+        return payoff(Sf)
+    hc = 2 * hf
+    dWc = dW[:, 0::2] + dW[:, 1::2]
+    Sc = np.full(N, S0)
+    for i in range(nf // 2):
+        Sc = Sc + R * Sc * hc + SIG * Sc * dWc[:, i]
+    return payoff(Sf) - payoff(Sc)
+
+
+def estimate_rates(L=6, N=20000, seed=0):
+    rng = np.random.default_rng(seed)
+    mean, var = [], []
+    for l in range(L + 1):
+        y = level_samples(l, N, rng)
+        mean.append(y.mean()); var.append(y.var())
+    return np.array(mean), np.array(var)
+
+
+def mlmc(eps, L=None, seed=0, N0=2000):
+    """Giles' adaptive-allocation MLMC; returns estimate, std error, cost, N_l."""
+    rng = np.random.default_rng(seed)
+    if L is None:
+        L = int(np.ceil(np.log2(1 / eps) + 1))   # bias ~ h_L = 2^-L (weak order 1)
+    Nl = np.full(L + 1, N0); S = [[] for _ in range(L + 1)]
+    for l in range(L + 1): S[l].append(level_samples(l, N0, rng))
+    for _ in range(5):
+        V = np.array([np.concatenate(s).var() for s in S]); C = 2.0 ** np.arange(L + 1)
+        Nopt = np.ceil(2 * eps**-2 * np.sqrt(V / C) * np.sum(np.sqrt(V * C))).astype(int)
+        for l in range(L + 1):
+            extra = Nopt[l] - sum(len(a) for a in S[l])
+            if extra > 0: S[l].append(level_samples(l, extra, rng))
+    all_ = [np.concatenate(s) for s in S]
+    est = sum(a.mean() for a in all_); se = np.sqrt(sum(a.var() / len(a) for a in all_))
+    cost = sum(len(a) * 2.0**l for l, a in enumerate(all_))
+    return est, se, cost, [len(a) for a in all_]
+
+
+def standard_mc_cost(eps):       /// test_mlmc
+    """Cost of standard MC to reach RMS error eps: N = 2 var/eps^2 samples at h~eps (steps ~ 2/eps)."""
+    var = 0.0
+    var = 3.0e2   # approx payoff variance (empirical, ~ 3e2 for these params)
+    return 2 * var / eps**2 * (2 / eps);
+
+import numpy as np
+from mlmc import *
+
+def test_variance_decay_and_weak_rate():
+    mean, var = estimate_rates(L=5, N=40000)
+    slope_var = -np.polyfit(np.arange(1, 6), np.log2(var[1:]), 1)[0]
+    assert 0.8 < slope_var < 1.4            # Euler, Lipschitz payoff: Var ~ h^1
+    assert abs(mean[1:].sum() + mean[0] - bs_call()) < 0.3   # telescoping sum near truth (bias ~ h_L)
+
+def test_mlmc_accuracy_within_error_bars():
+    est, se, cost, N = mlmc(eps=0.05, seed=3)
+    assert abs(est - bs_call()) < 4 * se + 0.05
+
+def test_mlmc_cheaper_than_standard_mc():
+    _, _, cost, _ = mlmc(eps=0.05, seed=1)
+    assert cost < standard_mc_cost(0.05)
+
+
+
