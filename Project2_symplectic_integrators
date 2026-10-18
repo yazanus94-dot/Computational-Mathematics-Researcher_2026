@@ -1,0 +1,97 @@
+# Symplectic vs. non-symplectic integrators on Hamiltonian systems      //Readme
+Störmer–Verlet and RK4 on the harmonic oscillator (exact solution) and the Hénon–Heiles system.
+**Checks:** observed convergence orders (≈2 vs ≈4); exact time-reversibility of Verlet; bounded long-time
+(t=2000) energy error for Verlet with no secular drift, versus uncontrolled RK4 energy error.
+Run: `pip install numpy pytest && pytest`
+
+
+import numpy as np      // """Symplectic (Stormer-Verlet) vs. non-symplectic (RK4) integration of Hamiltonian systems."""
+
+
+def henon_heiles_grad(q):
+    x, y = q
+    return np.array([x + 2 * x * y, y + x**2 - y**2])   # dV/dq
+
+
+def energy_hh(z):
+    x, y, px, py = z
+    return 0.5 * (px**2 + py**2) + 0.5 * (x**2 + y**2) + x**2 * y - y**3 / 3
+
+
+def verlet(gradV, q, p, h, n):
+    """Velocity Verlet. Returns trajectory array (n+1, 2d)."""
+    out = [np.concatenate([q, p])]
+    g = gradV(q)
+    for _ in range(n):
+        p = p - 0.5 * h * g
+        q = q + h * p
+        g = gradV(q)
+        p = p - 0.5 * h * g
+        out.append(np.concatenate([q, p]))
+    return np.array(out)
+
+
+def rk4(f, z, h, n):
+    out = [z]
+    for _ in range(n):
+        k1 = f(z); k2 = f(z + 0.5 * h * k1); k3 = f(z + 0.5 * h * k2); k4 = f(z + h * k3)
+        z = z + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+        out.append(z)
+    return np.array(out)
+
+
+def hh_field(z):
+    d = len(z) // 2
+    return np.concatenate([z[d:], -henon_heiles_grad(z[:d])])
+
+
+def harmonic_exact(q0, p0, t):
+    return q0 * np.cos(t) + p0 * np.sin(t), -q0 * np.sin(t) + p0 * np.cos(t)
+
+
+def convergence_order(method, T=2.0, hs=(0.1, 0.05, 0.025, 0.0125)):
+    """Observed order on harmonic oscillator q''=-q from (1,0)."""
+    errs = []
+    for h in hs:
+        n = int(round(T / h))
+        if method == "verlet":
+            z = verlet(lambda q: q, np.array([1.0]), np.array([0.0]), h, n)[-1]
+        else:
+            z = rk4(lambda z: np.array([z[1], -z[0]]), np.array([1.0, 0.0]), h, n)[-1]
+        qe, pe = harmonic_exact(1.0, 0.0, n * h)
+        errs.append(np.hypot(z[0] - qe, z[1] - pe))
+    errs = np.array(errs)
+    return np.log2(errs[:-1] / errs[1:]), errs;
+
+
+
+import numpy as np              //test_integrators
+from integrators import *
+
+def test_orders():
+    ov, _ = convergence_order("verlet"); o4, _ = convergence_order("rk4", hs=(0.2, 0.1, 0.05))
+    assert np.allclose(ov, 2, atol=0.1)
+    assert np.allclose(o4, 4, atol=0.2)
+
+def test_time_reversibility_verlet():
+    q0, p0 = np.array([0.1, 0.2]), np.array([0.3, -0.1])
+    tr = verlet(henon_heiles_grad, q0, p0, 0.01, 500)
+    back = verlet(henon_heiles_grad, tr[-1][:2], -tr[-1][2:], 0.01, 500)[-1]
+    assert np.allclose(back[:2], q0, atol=1e-10) and np.allclose(-back[2:], p0, atol=1e-10)
+
+def test_energy_drift_verlet_bounded_rk4_drifts():
+    z0 = np.array([0.0, 0.1, 0.3, 0.0]); E0 = energy_hh(z0); h, n = 0.05, 40000   # t = 2000
+    tv = verlet(henon_heiles_grad, z0[:2], z0[2:], h, n)
+    tr = rk4(hh_field, z0, h, n)
+    ev = np.abs([energy_hh(z) - E0 for z in tv[::100]])
+    er = np.abs([energy_hh(z) - E0 for z in tr[::100]])
+    assert ev.max() < 1e-3                       # bounded oscillation (modified Hamiltonian)
+    assert er[-1] > 1e-6                          # RK4 energy error is not controlled
+    assert np.polyfit(np.arange(len(ev)), ev, 1)[0] < 1e-7   # no secular drift
+
+
+
+
+
+
+
